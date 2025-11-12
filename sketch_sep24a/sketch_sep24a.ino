@@ -1,84 +1,100 @@
-const int buttonPin = 2;
-const int RledPin = 3;
-const int GledPin = 5;
-const int BledPin = 4;
+// ==== 腳位設定 ====
+const int buttonPin = 2;  // 按鈕 (INPUT_PULLUP：放開=HIGH，按下=LOW)
+const int GledPin   = 5;  // 綠燈
+const int BledPin   = 4;  // 藍燈
 
-int buttonState = 0;
-int lastButtonState = HIGH;
-int moodPoint = 10; // 初始中性 (綠)
-unsigned long lastChangeTime = 0;
+// ==== 模式 ====
+int mode = 0;  // 0=恆亮, 1=慢閃, 2=中閃, 3=快閃
+
+// ==== 去彈跳 ====
+int buttonState = HIGH;        
+int lastReading = HIGH;        
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;  // 去彈跳延遲
+
+// ==== 閃爍控制 ====
+unsigned long previousMillis = 0;
+bool ledOn = true;  // G+B 是否點亮 (LOW=亮, HIGH=滅)
+
+// 閃爍速度（毫秒）
+const unsigned long slowBlink = 1000;
+const unsigned long midBlink  = 500;
+const unsigned long fastBlink = 200;
+
+// ==== 小工具：控制 G+B ====
+void GBwrite(bool on) {
+  // ⚙️ LOW=亮、HIGH=滅
+  if (on) {
+    digitalWrite(GledPin, LOW);
+    digitalWrite(BledPin, LOW);
+  } else {
+    digitalWrite(GledPin, HIGH);
+    digitalWrite(BledPin, HIGH);
+  }
+}
 
 void setup() {
-  pinMode(RledPin, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
   pinMode(GledPin, OUTPUT);
   pinMode(BledPin, OUTPUT);
-  pinMode(buttonPin, INPUT_PULLUP);
-  Serial.begin(9600);
 
-  // 🌿 初始為綠色
-  setMoodColor(moodPoint);
-  Serial.println("Init: GREEN");
-  lastChangeTime = millis();
+  // ✅ 初始為 G+B 恆亮（青色）
+  GBwrite(true);
+  previousMillis = millis();
 }
 
 void loop() {
-  buttonState = digitalRead(buttonPin);
-
-  // --- 每按一下加一分（往藍方向） ---
-  if (lastButtonState == HIGH && buttonState == LOW) {
-    if (moodPoint < 20) moodPoint++;
-    Serial.print("Pressed +1 → ");
-    Serial.println(moodPoint);
-    lastChangeTime = millis();
+  // ---- 去彈跳讀按鈕 ----
+  int reading = digitalRead(buttonPin);
+  if (reading != lastReading) {
+    lastDebounceTime = millis();
   }
-  lastButtonState = buttonState;
 
-  // --- 每 2 秒沒按：扣一分（往紅方向） ---
-  if (millis() - lastChangeTime >= 2000) {
-    if (moodPoint > 0) {
-      moodPoint--;
-      Serial.print("Auto -1 → ");
-      Serial.println(moodPoint);
-      lastChangeTime = millis();
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      if (buttonState == LOW) {
+        mode = (mode + 1) % 4;     // 循環 0→1→2→3→0
+        previousMillis = millis(); // 切模式時重設時間
+        ledOn = true;              // 新模式從亮開始
+        GBwrite(true);
+      }
     }
   }
+  lastReading = reading;
 
-  // --- 根據分數顯示光譜顏色 ---
-  setMoodColor(moodPoint);
-}
+  // ---- 根據模式控制 G+B ----
+  unsigned long now = millis();
 
-// moodPoint: 0(紅) → 10(綠) → 20(藍)
-void setMoodColor(int point) {
-  int r, g, b;
+  switch (mode) {
+    case 0: // 恆亮
+      GBwrite(true);
+      break;
 
-  if (point <= 10) {
-    // 紅 → 綠
-    r = map(point, 0, 10, 255, 0);
-    g = map(point, 0, 10, 0, 255);
-    b = 0;
-  } else {
-    // 綠 → 藍
-    r = 0;
-    g = map(point, 10, 20, 255, 0);
-    b = map(point, 10, 20, 0, 255);
+    case 1: // 慢閃
+      if (now - previousMillis >= slowBlink) {
+        previousMillis = now;
+        ledOn = !ledOn;
+        GBwrite(ledOn);
+      }
+      break;
+
+    case 2: // 中閃
+      if (now - previousMillis >= midBlink) {
+        previousMillis = now;
+        ledOn = !ledOn;
+        GBwrite(ledOn);
+      }
+      break;
+
+    case 3: // 快閃
+      if (now - previousMillis >= fastBlink) {
+        previousMillis = now;
+        ledOn = !ledOn;
+        GBwrite(ledOn);
+      }
+      break;
   }
-
-  // ✅ 共陰極：PWM 數值越小越亮（反轉）
-  analogWrite(RledPin, 255 - r);
-  analogWrite(GledPin, 255 - g);
-  analogWrite(BledPin, 255 - b);
-
-  Serial.print("Mood: ");
-  Serial.print(point);
-  Serial.print(" | RGB(");
-  Serial.print(r); Serial.print(", ");
-  Serial.print(g); Serial.print(", ");
-  Serial.print(b); Serial.println(")");
 }
-
-
-
-
-
 
 
