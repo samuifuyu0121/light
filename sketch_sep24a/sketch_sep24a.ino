@@ -1,100 +1,190 @@
-// ==== 腳位設定 ====
-const int buttonPin = 2;  // 按鈕 (INPUT_PULLUP：放開=HIGH，按下=LOW)
-const int GledPin   = 5;  // 綠燈
-const int BledPin   = 4;  // 藍燈
+// ====== 腳位設定（LOW=亮, HIGH=滅）======
+const int pushButton = 2;
+const int RledPin   = 3;  // PWM
+const int GledPin   = 5;  // PWM
+const int BledPin   = 4;  // 非PWM，用軟體PWM實現呼吸
 
-// ==== 模式 ====
-int mode = 0;  // 0=恆亮, 1=慢閃, 2=中閃, 3=快閃
+// ====== 模式設定 ======
+enum Mode { MODE_CYCLE = 0, MODE_BLINK_YELLOW = 1, MODE_BLINK_GREEN = 2 }; // ✅ 第二個閃爍改成綠
+Mode mode = MODE_CYCLE;
 
-// ==== 去彈跳 ====
-int buttonState = HIGH;        
-int lastReading = HIGH;        
-unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 50;  // 去彈跳延遲
+// ====== 時序參數 ======
+const unsigned long cycleInterval    = 2000;
+const unsigned long blinkInterval    = 500;
+const unsigned long debounceMs       = 30;
+const unsigned long longPressMs      = 600;
+const unsigned long ultraLongPressMs = 1500;
+const unsigned long breathStepMs     = 1;
 
-// ==== 閃爍控制 ====
-unsigned long previousMillis = 0;
-bool ledOn = true;  // G+B 是否點亮 (LOW=亮, HIGH=滅)
+// ====== 軟體PWM（給 pin 4 用）=====
+const unsigned long SWPWM_PERIOD_US = 1020;
+unsigned long swpwmStartUs = 0;
 
-// 閃爍速度（毫秒）
-const unsigned long slowBlink = 1000;
-const unsigned long midBlink  = 500;
-const unsigned long fastBlink = 200;
+// ====== 狀態變數 ======
+int colorState = 0;  // 模式1用：0=綠,1=青,2=黃
+unsigned long lastChangeTime = 0;
+unsigned long lastButtonChange = 0;
+bool buttonStableState = HIGH;
+unsigned long pressStartTime = 0;
 
-// ==== 小工具：控制 G+B ====
-void GBwrite(bool on) {
-  // ⚙️ LOW=亮、HIGH=滅
-  if (on) {
-    digitalWrite(GledPin, LOW);
-    digitalWrite(BledPin, LOW);
+// ====== 呼吸狀態 ======
+bool breathingActive   = false;
+bool breatheGreenPhase = true; // true=綠呼吸；false=藍呼吸
+int  breathValue       = 0;
+int  breathDir         = +1;
+unsigned long lastBreathStep = 0;
+
+// ====== 小工具（LOW=亮 / HIGH=滅）======
+void allOff() {
+  digitalWrite(RledPin, HIGH);
+  digitalWrite(GledPin, HIGH);
+  digitalWrite(BledPin, HIGH);
+}
+
+void showGreen() {
+  digitalWrite(RledPin, HIGH);
+  digitalWrite(GledPin, LOW);
+  digitalWrite(BledPin, HIGH);
+}
+
+void showCyan() { // 綠+藍
+  digitalWrite(RledPin, HIGH);
+  digitalWrite(GledPin, LOW);
+  digitalWrite(BledPin, LOW);
+}
+
+void showYellow() { // 紅+綠
+  digitalWrite(RledPin, LOW);
+  digitalWrite(GledPin, LOW);
+  digitalWrite(BledPin, HIGH);
+}
+
+// ====== PWM 控制（藍色軟PWM）======
+inline void pwmGreen(uint8_t level) {
+  analogWrite(GledPin, 255 - level);
+}
+
+inline void swpwmBlue(uint8_t level) {
+  unsigned long phase = (micros() - swpwmStartUs) % SWPWM_PERIOD_US;
+  unsigned long onUs  = (unsigned long)level * SWPWM_PERIOD_US / 255;
+  if (phase < onUs)  digitalWrite(BledPin, LOW);
+  else               digitalWrite(BledPin, HIGH);
+}
+
+// ====== 呼吸控制（綠/藍交替、暗→亮→暗）======
+void updateBreathing(unsigned long now) {
+  if (now - lastBreathStep >= breathStepMs) {
+    lastBreathStep = now;
+    breathValue += breathDir;
+    if (breathValue >= 255) { breathValue = 255; breathDir = -1; }
+    if (breathValue <= 0)   { breathValue = 0;   breathDir = +1; breatheGreenPhase = !breatheGreenPhase; }
+  }
+
+  digitalWrite(RledPin, HIGH); // R關閉
+  if (breatheGreenPhase) {
+    pwmGreen((uint8_t)breathValue);
+    digitalWrite(BledPin, HIGH);
   } else {
     digitalWrite(GledPin, HIGH);
-    digitalWrite(BledPin, HIGH);
+    swpwmBlue((uint8_t)breathValue);
   }
 }
 
 void setup() {
-  pinMode(buttonPin, INPUT_PULLUP);
+  Serial.begin(9600);
+  pinMode(pushButton, INPUT_PULLUP);
+  pinMode(RledPin, OUTPUT);
   pinMode(GledPin, OUTPUT);
   pinMode(BledPin, OUTPUT);
+  swpwmStartUs = micros();
 
-  // ✅ 初始為 G+B 恆亮（青色）
-  GBwrite(true);
-  previousMillis = millis();
+  colorState = 0;
+  lastChangeTime = millis();
+  showGreen(); // 初始綠
 }
 
 void loop() {
-  // ---- 去彈跳讀按鈕 ----
-  int reading = digitalRead(buttonPin);
-  if (reading != lastReading) {
-    lastDebounceTime = millis();
-  }
+  unsigned long now = millis();
 
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (reading != buttonState) {
-      buttonState = reading;
-      if (buttonState == LOW) {
-        mode = (mode + 1) % 4;     // 循環 0→1→2→3→0
-        previousMillis = millis(); // 切模式時重設時間
-        ledOn = true;              // 新模式從亮開始
-        GBwrite(true);
+  // ===== 按鈕去彈跳 =====
+  int raw = digitalRead(pushButton);
+  if (raw != buttonStableState && (now - lastButtonChange) >= debounceMs) {
+    buttonStableState = raw;
+    lastButtonChange  = now;
+
+    if (buttonStableState == LOW) {
+      pressStartTime   = now;
+      breathingActive  = false;
+      breatheGreenPhase = true;
+      breathValue      = 0;
+      breathDir        = +1;
+      lastBreathStep   = now;
+      allOff();
+    } else {
+      unsigned long pressDuration = now - pressStartTime;
+
+      if (pressDuration >= ultraLongPressMs) {
+        breathingActive = false;
+        if (mode == MODE_CYCLE) { colorState = 0; lastChangeTime = now; showGreen(); }
+      } else if (pressDuration >= longPressMs) {
+        if (mode == MODE_CYCLE) { colorState = 0; lastChangeTime = now; showGreen(); }
+      } else if (pressDuration >= debounceMs) {
+        // ✅ 短按切換三模式
+        mode = static_cast<Mode>((static_cast<int>(mode) + 1) % 3);
+        lastChangeTime = now;
+        switch (mode) {
+          case MODE_CYCLE:        colorState = 0; showGreen(); break;
+          case MODE_BLINK_YELLOW: showYellow();  break;  // 黃色閃爍
+          case MODE_BLINK_GREEN:  showGreen();   break;  // 綠色閃爍
+        }
       }
     }
   }
-  lastReading = reading;
 
-  // ---- 根據模式控制 G+B ----
-  unsigned long now = millis();
+  // ===== 長按期間：>1.5s → 呼吸模式 =====
+  if (buttonStableState == LOW) {
+    unsigned long held = now - pressStartTime;
+    if (held >= ultraLongPressMs) {
+      breathingActive = true;
+      updateBreathing(now);
+    } else {
+      breathingActive = false;
+      allOff();
+    }
+    return;
+  }
 
+  // ===== 放開後維持模式 =====
+  breathingActive = false;
   switch (mode) {
-    case 0: // 恆亮
-      GBwrite(true);
+    case MODE_CYCLE:
+      if (now - lastChangeTime >= cycleInterval) {
+        colorState = (colorState + 1) % 3; // 綠→青→黃→綠
+        lastChangeTime = now;
+      }
+      if (colorState == 0)      showGreen();
+      else if (colorState == 1) showCyan();
+      else                      showYellow();
       break;
 
-    case 1: // 慢閃
-      if (now - previousMillis >= slowBlink) {
-        previousMillis = now;
-        ledOn = !ledOn;
-        GBwrite(ledOn);
+    case MODE_BLINK_YELLOW: { // 第一個閃爍：黃色
+      static bool onY = true;
+      if (now - lastChangeTime >= blinkInterval) {
+        lastChangeTime = now;
+        onY = !onY;
+        if (onY) showYellow(); else allOff();
       }
       break;
+    }
 
-    case 2: // 中閃
-      if (now - previousMillis >= midBlink) {
-        previousMillis = now;
-        ledOn = !ledOn;
-        GBwrite(ledOn);
+    case MODE_BLINK_GREEN: { // 第二個閃爍：綠色
+      static bool onG = true;
+      if (now - lastChangeTime >= blinkInterval) {
+        lastChangeTime = now;
+        onG = !onG;
+        if (onG) showGreen(); else allOff();
       }
       break;
-
-    case 3: // 快閃
-      if (now - previousMillis >= fastBlink) {
-        previousMillis = now;
-        ledOn = !ledOn;
-        GBwrite(ledOn);
-      }
-      break;
+    }
   }
 }
-
-
